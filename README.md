@@ -22,7 +22,7 @@ Launch Audacious
 
 https://github.com/user-attachments/assets/bcde827d-d042-4b64-819c-99bf04dea5f0
 
-![VU Meter Preview](preview.png)
+![VU Meter Preview](Preview.png)
 
 ## Building from Source
 
