@@ -9,6 +9,12 @@ Originally based on legacy GTK2 source code (inspired by the classic [XMMS VU Me
 - **Audacious 4.6.1 ABI Compatible:** Built against contemporary header and library structures using Meson and Ninja.
 - **Lightweight & Responsive:** Retains the vintage dual-needle aesthetic while leveraging hardware-accelerated UI rendering.
 
+## Installation
+Download the Audacious-analog-vu-QT.zip file from the [Audacious-analog-vu-QT Plugin](https://github.com/IceLancerS/Audacious-analog-vu-QT/releases)
+Place downloaded vumeter-skin-qt.dll file to the General plugins directory of your Audacious installation (something like C:\Program Files (x86)\Audacious\lib\audacious\Visualization)
+Copy skins to "Audacious\vumeter-skin-qt\"
+Launch Audacious
+
 ## Preview
 
 https://github.com/user-attachments/assets/bcde827d-d042-4b64-819c-99bf04dea5f0
