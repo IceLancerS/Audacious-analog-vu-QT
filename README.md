@@ -10,6 +10,9 @@ Originally based on legacy GTK2 source code (inspired by the classic [XMMS VU Me
 - **Lightweight & Responsive:** Retains the vintage dual-needle aesthetic while leveraging hardware-accelerated UI rendering.
 
 ## Preview
+
+https://github.com/user-attachments/assets/bcde827d-d042-4b64-819c-99bf04dea5f0
+
 ![VU Meter Preview](preview.png)
 
 ## Building from Source
