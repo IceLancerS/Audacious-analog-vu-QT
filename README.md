@@ -11,8 +11,11 @@ Originally based on legacy GTK2 source code (inspired by the classic [XMMS VU Me
 
 ## Installation
 Download the Audacious-analog-vu-QT.zip file from the [Audacious-analog-vu-QT Plugin](https://github.com/IceLancerS/Audacious-analog-vu-QT/releases)
+
 Place downloaded vumeter-skin-qt.dll file to the General plugins directory of your Audacious installation (something like C:\Program Files (x86)\Audacious\lib\audacious\Visualization)
+
 Copy skins to "Audacious\vumeter-skin-qt\"
+
 Launch Audacious
 
 ## Preview
