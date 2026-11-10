@@ -14,7 +14,7 @@ Download the Audacious-analog-vu-QT.zip file from the [Audacious-analog-vu-QT Pl
 
 Place downloaded vumeter-skin-qt.dll file to the General plugins directory of your Audacious installation (something like C:\Program Files (x86)\Audacious\lib\audacious\Visualization)
 
-Copy skins to "Audacious\vumeter-skin-qt\"
+Copy skins to "Audacious\share\audacious\VU_Meter_skins\"
 
 Launch Audacious
 
