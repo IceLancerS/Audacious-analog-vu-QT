@@ -19,7 +19,7 @@ To compile this plugin from source, ensure you have an active MSYS2 MINGW64 envi
 1. **Clone the repository into your Audacious plugins source tree:**
    ```bash
    cd /c/audacious-plugins-audacious-plugins/src/
-   git clone https://github.com/YOUR_USERNAME/vumeter-skin-qt.git
+   git clone https://github.com/IceLancerS/Audacious-analog-vu-QT/vumeter-skin-qt.git
    ```
 
 2. **Register the plugin in the parent `src/meson.build`:**
