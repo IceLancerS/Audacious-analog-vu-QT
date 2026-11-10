@@ -1,4 +1,4 @@
-# VU Meter Skin for Audacious (Qt)
+# VU Meter Skin for Audacious (Qt) For WINDOWS
 
 A modern Qt6 port of the classic XMMS/Audacious VU Meter plugin, rewritten and optimized for **Audacious 4.6.1+** on Windows using the MinGW-w64 / MSYS2 toolchain.
 
