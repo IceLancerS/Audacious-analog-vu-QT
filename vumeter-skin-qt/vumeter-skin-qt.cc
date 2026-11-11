@@ -250,51 +250,38 @@ static bool load_skin(const SkinRef & ref, Skin & skin)
 
 static constexpr float FLOOR_DB = -93.f;
 
-static float audio_rms[2][10], audio_peak[2][10];
-static float rms_values[3], peak_values[3];   // [0] = average, [1] = L, [2] = R
-static qint64 last_render_ms = 0;
+static int cfg_response() { int v = aud_get_int(CFG, "response_ms"); return (v < 10 || v > 500) ? 80 : v; }
+static int cfg_fall()     { int v = aud_get_int(CFG, "peak_fall");   return (v < 5 || v > 100) ? 20 : v; }
+static int cfg_source()   { int v = aud_get_int(CFG, "data_source"); return (v == 2) ? 2 : 1; }
+static int cfg_smooth()   { int v = aud_get_int(CFG, "smoothing");   return (v < 0 || v > 300) ? 100 : v; }
+// Gain is separate per data source: peaks read ~10 dB higher than RMS on music
+static int cfg_gain(int src)
+{
+    int v = aud_get_int(CFG, src == 1 ? "rms_gain" : "peak_gain");
+    return qBound(-20, v, 30);
+}
+
 static QElapsedTimer clock_ms;
 
-static int cfg_decay()   { int v = aud_get_int(CFG, "decay_pct");      return (v < 1 || v > 90) ? 30 : v; }
-static int cfg_samples() { int v = aud_get_int(CFG, "num_of_samples"); return (v < 1 || v > 10) ? 1 : v; }
-static int cfg_source()  { int v = aud_get_int(CFG, "data_source");    return (v == 2) ? 2 : 1; }
+// Latest raw snapshot written by render_multi_pcm()
+static double snap_ms[2];             // mean square per channel
+static float  snap_pk[2];             // sample peak per channel (dBFS)
+static qint64 last_render_ms = 0, last_tick_ms = 0;
+
+// Filtered state, published values: [0] = average/max, [1] = L, [2] = R
+static double pow_ms[2];
+static float  peak_hold[2];
+static float  rms_values[3], peak_values[3];
 
 static void reset_dsp()
 {
     for (int c = 0; c < 2; c++)
-        for (int i = 0; i < 10; i++)
-            audio_rms[c][i] = audio_peak[c][i] = FLOOR_DB;
+    {
+        snap_ms[c] = 0.0;  snap_pk[c] = FLOOR_DB;
+        pow_ms[c] = 0.0;   peak_hold[c] = FLOOR_DB;
+    }
     for (int i = 0; i < 3; i++)
         rms_values[i] = peak_values[i] = FLOOR_DB;
-}
-
-// Shift history, store newest values, publish averaged values
-static void store_values(float lrms, float rrms, float lpeak, float rpeak)
-{
-    for (int i = 9; i >= 1; i--)
-        for (int c = 0; c < 2; c++)
-        {
-            audio_rms[c][i] = audio_rms[c][i - 1];
-            audio_peak[c][i] = audio_peak[c][i - 1];
-        }
-
-    audio_rms[0][0]  = qMax(lrms, FLOOR_DB);
-    audio_rms[1][0]  = qMax(rrms, FLOOR_DB);
-    audio_peak[0][0] = qMax(lpeak, FLOOR_DB);
-    audio_peak[1][0] = qMax(rpeak, FLOOR_DB);
-
-    int n = cfg_samples();
-    float t[4] = {0, 0, 0, 0};
-    for (int i = 0; i < n; i++)
-    {
-        t[0] += audio_rms[0][i];  t[1] += audio_rms[1][i];
-        t[2] += audio_peak[0][i]; t[3] += audio_peak[1][i];
-    }
-    for (int i = 0; i < 4; i++)
-        t[i] /= (float)n;
-
-    rms_values[0] = (t[0] + t[1]) / 2.f;  rms_values[1] = t[0];  rms_values[2] = t[1];
-    peak_values[0] = (t[2] + t[3]) / 2.f; peak_values[1] = t[2]; peak_values[2] = t[3];
 }
 
 static float to_db(float x)
@@ -302,19 +289,40 @@ static float to_db(float x)
     if (x < 1e-5f)
         return FLOOR_DB;
     float db = 20.f * log10f(x);
-    return (db > -0.1f) ? -0.1f : db;
+    return (db > -0.1f) ? -0.1f : (db < FLOOR_DB ? FLOOR_DB : db);
 }
 
-// Same "fall by X% of the current dB value" rule as the old plugin
-static float apply_decay(float value, float previous)
+// One ballistics step. dt is the real elapsed time in ms, so the response is
+// independent of how often we are called.
+//  RMS : first-order integration of power (time constant = "Response")
+//  Peak: instant attack, constant fall in dB per second
+static void advance(const double ms[2], const float pk[2], double dt)
 {
-    if (value < previous)
+    const double a = 1.0 - exp(-dt / (double)cfg_response());
+    const float fall = (float)cfg_fall() * (float)(dt / 1000.0);
+    float rms_db[2];
+
+    for (int c = 0; c < 2; c++)
     {
-        float d = previous + previous * ((float)cfg_decay() / 100.f);
-        if (d > value)
-            return d;
+        pow_ms[c] += a * (ms[c] - pow_ms[c]);
+        if (pow_ms[c] < 1e-12) pow_ms[c] = 0.0;
+        rms_db[c] = to_db((float)sqrt(pow_ms[c]));
+
+        float f = peak_hold[c] - fall;
+        peak_hold[c] = qMax(qMax(f, pk[c]), FLOOR_DB);
     }
-    return value;
+
+    const float rms_t[3] = { to_db((float)sqrt((pow_ms[0] + pow_ms[1]) * 0.5)), rms_db[0], rms_db[1] };
+    const float pk_t[3]  = { qMax(peak_hold[0], peak_hold[1]), peak_hold[0], peak_hold[1] };
+
+    // Final smoothing of what the needle shows (in dB), so its motion stays even
+    const double sm = (double)cfg_smooth();
+    const float b = (sm < 1.0) ? 1.f : (float)(1.0 - exp(-dt / sm));
+    for (int i = 0; i < 3; i++)
+    {
+        rms_values[i]  += b * (rms_t[i] - rms_values[i]);
+        peak_values[i] += b * (pk_t[i]  - peak_values[i]);
+    }
 }
 
 /* ------------------------------------------------------------------------ *
@@ -345,7 +353,8 @@ public:
         resize(sizeHint());
 
         QObject::connect(&m_timer, &QTimer::timeout, [this]() { tick(); });
-        m_timer.start(100);
+        m_timer.setTimerType(Qt::PreciseTimer);
+        m_timer.start(16);   // ~60 Hz redraw
     }
 
     QSize sizeHint() const override
@@ -395,12 +404,13 @@ protected:
 
                 if (m.type == 1)   // analog needle
                 {
+                    const float vn = v + (float)cfg_gain(cfg_source());   // calibration gain: needles only
                     float angle;
-                    if (v <= m.db_min)      angle = m.angle_min;
-                    else if (v >= m.db_max) angle = m.angle_max;
+                    if (vn <= m.db_min)      angle = m.angle_min;
+                    else if (vn >= m.db_max) angle = m.angle_max;
                     else
                     {
-                        angle = log10f(fabsf(v - 1.f)) / log10f(fabsf(m.db_min) + 1.f);
+                        angle = log10f(fabsf(vn - 1.f)) / log10f(fabsf(m.db_min) + 1.f);
                         angle = m.angle_range * (1.f - angle) + m.angle_min;
                     }
 
@@ -451,29 +461,21 @@ private:
         update();
     }
 
-    // Decay values while no audio arrives (paused/stopped)
+    // Runs ~60 times a second: feeds the latest snapshot (or silence, if no
+    // audio has arrived for 100 ms) through the ballistics and redraws.
     void tick()
     {
-        if (clock_ms.elapsed() - last_render_ms <= 100)
-            return;
+        const qint64 now = clock_ms.elapsed();
+        const double dt = qBound(1.0, (double)(now - last_tick_ms), 100.0);
+        last_tick_ms = now;
 
-        float d[4] = {FLOOR_DB, FLOOR_DB, FLOOR_DB, FLOOR_DB};
-        bool redraw = false;
-        const float k = 1.f + (float)cfg_decay() / 100.f;
+        const bool live = (now - last_render_ms) <= 100;
+        const double ms[2] = {live ? snap_ms[0] : 0.0, live ? snap_ms[1] : 0.0};
+        const float pk[2] = {live ? snap_pk[0] : FLOOR_DB, live ? snap_pk[1] : FLOOR_DB};
+        advance(ms, pk, dt);
 
-        float * src[4] = {&audio_rms[0][0], &audio_rms[1][0], &audio_peak[0][0], &audio_peak[1][0]};
-        for (int i = 0; i < 4; i++)
-            if (*src[i] > FLOOR_DB)
-            {
-                redraw = true;
-                d[i] = *src[i] * k;
-            }
-
-        if (redraw)
-        {
-            store_values(d[0], d[1], d[2], d[3]);
+        if (live || rms_values[0] > FLOOR_DB + 0.05f || peak_values[0] > FLOOR_DB + 0.05f)
             update();
-        }
     }
 
     Skin m_skin;
@@ -518,17 +520,23 @@ const ComboItem VUMeterPlugin::source_items[] = {
 };
 
 const PreferencesWidget VUMeterPlugin::widgets[] = {
-    WidgetSpin(N_("Decay:"), WidgetInt(CFG, "decay_pct"), {1, 90, 1, N_("%")}),
-    WidgetSpin(N_("Smoothing (samples):"), WidgetInt(CFG, "num_of_samples"), {1, 10, 1}),
+    WidgetSpin(N_("RMS response:"), WidgetInt(CFG, "response_ms"), {10, 500, 5, N_("ms")}),
+    WidgetSpin(N_("Peak fall:"), WidgetInt(CFG, "peak_fall"), {5, 100, 1, N_("dB/s")}),
+    WidgetSpin(N_("Needle smoothing:"), WidgetInt(CFG, "smoothing"), {0, 300, 5, N_("ms")}),
+    WidgetSpin(N_("RMS gain:"), WidgetInt(CFG, "rms_gain"), {-20, 30, 1, N_("dB")}),
+    WidgetSpin(N_("Peak gain:"), WidgetInt(CFG, "peak_gain"), {-20, 30, 1, N_("dB")}),
     WidgetCombo(N_("Data source:"), WidgetInt(CFG, "data_source"), {{source_items}})
 };
 
 const PluginPreferences VUMeterPlugin::prefs = {{widgets}};
 
 static const char * const defaults[] = {
-    "decay_pct", "30",
-    "num_of_samples", "3",
+    "response_ms", "120",
+    "smoothing", "100",
+    "peak_fall", "20",
     "data_source", "1",
+    "rms_gain", "6",
+    "peak_gain", "0",
     "skin", "",
     nullptr
 };
@@ -543,7 +551,7 @@ bool VUMeterPlugin::init()
 
 void VUMeterPlugin::clear()
 {
-    // Playback stopped: let the widget's timer decay the needles
+    // Playback stopped: the widget timer lets the needles fall back
     last_render_ms = 0;
 }
 
@@ -553,7 +561,6 @@ void VUMeterPlugin::render_multi_pcm(const float * pcm, int channels)
         return;
 
     const int N = 512;   // Audacious delivers 512 frames per call
-    float rms[2], peak[2];
 
     for (int ch = 0; ch < 2; ch++)
     {
@@ -563,31 +570,17 @@ void VUMeterPlugin::render_multi_pcm(const float * pcm, int channels)
 
         for (int i = 0; i < N; i++)
         {
-            float v = pcm[i * channels + c];
+            const float v = pcm[i * channels + c];
             sum += (double)v * v;
+            const float av = fabsf(v);
+            if (av > pk) pk = av;
         }
 
-        // peak = loudest 3-sample moving average of |x|, like the original
-        for (int i = 1; i < N - 1; i++)
-        {
-            float a = (fabsf(pcm[(i - 1) * channels + c]) +
-                       fabsf(pcm[i * channels + c]) +
-                       fabsf(pcm[(i + 1) * channels + c])) / 3.f;
-            if (a > pk) pk = a;
-        }
-
-        rms[ch] = to_db((float)sqrt(sum / N));
-        peak[ch] = to_db(pk);
+        snap_ms[ch] = sum / N;
+        snap_pk[ch] = to_db(pk);
     }
 
-    rms[0]  = apply_decay(rms[0],  audio_rms[0][0]);
-    rms[1]  = apply_decay(rms[1],  audio_rms[1][0]);
-    peak[0] = apply_decay(peak[0], audio_peak[0][0]);
-    peak[1] = apply_decay(peak[1], audio_peak[1][0]);
-
-    store_values(rms[0], rms[1], peak[0], peak[1]);
     last_render_ms = clock_ms.elapsed();
-    widget->update();
 }
 
 void * VUMeterPlugin::get_qt_widget()
