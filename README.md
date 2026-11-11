@@ -16,6 +16,11 @@ Place downloaded vumeter-skin-qt.dll file to the General plugins directory of yo
 
 Copy skins to "Audacious\share\audacious\VU_Meter_skins\"
 
+Enable Plugin (Services->Plugin->Visualization->Analog VU Meter)
+
+<img width="657" height="555" alt="location" src="https://github.com/user-attachments/assets/1453f8e0-bf4f-497a-9b11-50322f877873" />
+
+
 Launch Audacious
 
 ## Preview
