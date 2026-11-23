@@ -26,7 +26,7 @@ Launch Audacious
 
 ## Preview
 
-https://github.com/user-attachments/assets/bcde827d-d042-4b64-819c-99bf04dea5f0
+https://github.com/user-attachments/assets/901a568e-d0fc-401f-b5dd-6ef010d5dace
 
 Technics Style PEAKS
 Everything on its screen responds to actual options within player. 
