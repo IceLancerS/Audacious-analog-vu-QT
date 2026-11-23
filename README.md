@@ -26,12 +26,12 @@ Launch Audacious
 
 ## Preview
 
-https://github.com/user-attachments/assets/901a568e-d0fc-401f-b5dd-6ef010d5dace
+https://github.com/user-attachments/assets/bcde827d-d042-4b64-819c-99bf04dea5f0
 
 Technics Style PEAKS
 Everything on its screen responds to actual options within player. 
 ## Normal , CrO2 , Metal are sound quality if lossless is playing Metal will be shown
-<img width="1643" height="889" alt="Screenshot 2026-11-23 214442" src="https://github.com/user-attachments/assets/2f032877-1d4f-484a-83e9-a70e29a1ac32" />
+https://github.com/user-attachments/assets/901a568e-d0fc-401f-b5dd-6ef010d5dace
 
 
 ## Building from Source
