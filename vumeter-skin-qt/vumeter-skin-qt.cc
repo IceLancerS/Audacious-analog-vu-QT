@@ -14,6 +14,7 @@
  * Deliberately has no Q_OBJECT / signals / slots, so it needs no moc step.
  */
 
+#include <algorithm>
 #include <math.h>
 #include <string.h>
 
@@ -23,13 +24,17 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontMetricsF>
+#include <QLinearGradient>
 #include <QMenu>
 #include <QPainter>
 #include <QPixmap>
+#include <QPolygonF>
 #include <QTimer>
 #include <QVector>
 #include <QWidget>
 
+#include <libaudcore/drct.h>
 #include <libaudcore/i18n.h>
 #include <libaudcore/plugin.h>
 #include <libaudcore/preferences.h>
@@ -41,9 +46,18 @@
  *  Skin data
  * ------------------------------------------------------------------------ */
 
+struct Zone
+{
+    float db;        // zone starts at this level
+    QColor color;
+    float h;         // lit height in px (0 = full bar height)
+};
+
 struct Module
 {
-    int type = 0;          // 1 = analog needle, 2 = on/off image
+    // 1 = analog needle, 2 = on/off image,
+    // 3 = LED bar, 4 = counter, 5 = lamp, 6 = text label, 7 = rectangle
+    int type = 0;
     bool enabled = false;
     int channel = 0;       // 0 = average, 1 = left, 2 = right
     int layer = 1;         // 1..5
@@ -54,6 +68,32 @@ struct Module
     float db_min = -300.f, db_max = 0.f;
     float angle_min = -180.f, angle_max = 180.f, angle_range = 0.f;
     QPixmap on_img, off_img;
+
+    // ---- hardware-style elements (types 3..7)
+    int source = 0;                // 0 = follow "Data source", 1 = RMS, 2 = peak
+    float w = 0.f, h = 0.f;        // size (bar, rect, counter digit, chase arrow)
+    QColor color2;                 // lamp "off" colour / rect gradient bottom
+    QColor border;                 // rect border
+    float corner = 0.f;            // rect corner radius
+    QString text, family, lamp;
+    float font_px = 10.f, spacing = 0.f;
+    bool bold = false;
+    int align = 0;                 // 0 left, 1 centre, 2 right (px = anchor, py = baseline)
+    // bar
+    int segments = 0;
+    float seg_gap = 1.f;
+    float offset_db = 0.f;         // calibration added to the level (18 = full scale is +18)
+    float dim = 0.15f;             // brightness of unlit segments / digits
+    float hold_ms = 0.f, hold_fall = 20.f;
+    QVector<QPointF> scale;        // (dB, position in px along the bar)
+    QVector<Zone> zones;
+    QVector<float> seg_db;         // computed: dB threshold of every segment
+    // counter / chase
+    float pitch = 0.f, dot_w = 0.f, thick = 0.f;
+    int count = 4;
+    // runtime state (bar peak hold)
+    float hold_db = -999.f;
+    qint64 hold_t = 0;
 };
 
 struct Skin
@@ -64,6 +104,7 @@ struct Skin
     int width = 275, height = 116;
     QPixmap background;
     QPixmap titlebar;      // only used to know how much to crop off the top
+    QColor window_color;   // optional fill around/behind the skin
     QVector<Module> modules;
 };
 
@@ -97,6 +138,12 @@ static QVector<SkinRef> scan_skins()
     return list;
 }
 
+static QColor parse_color(const QString & v, const QColor & fallback)
+{
+    QColor c(v.trimmed());
+    return c.isValid() ? c : fallback;
+}
+
 static void parse_skin_key(Skin & s, const QString & key, const QString & val, const QDir & dir)
 {
     if (key == "skin_size")
@@ -105,14 +152,16 @@ static void parse_skin_key(Skin & s, const QString & key, const QString & val, c
         if (p.size() >= 2)
         {
             int w = p[0].trimmed().toInt(), h = p[1].trimmed().toInt();
-            s.width = (w < 10 || w > 800) ? 275 : w;
-            s.height = (h < 10 || h > 800) ? 116 : h;
+            s.width = (w < 10 || w > 2000) ? 275 : w;
+            s.height = (h < 10 || h > 2000) ? 116 : h;
         }
     }
     else if (key == "background_img")
         s.background = QPixmap(dir.filePath(val));
     else if (key == "titlebar_off_img")
         s.titlebar = QPixmap(dir.filePath(val));
+    else if (key == "window_color")
+        s.window_color = QColor(val.trimmed());
     // titlebar_on_img, exit_button_pos, conf_button_pos: not used in the Qt port
 }
 
@@ -123,6 +172,11 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
         QString v = val.toLower();
         if (v == "image") m.type = 2;
         else if (v == "analogvu") m.type = 1;
+        else if (v == "bar") m.type = 3;
+        else if (v == "counter") m.type = 4;
+        else if (v == "lamp") m.type = 5;
+        else if (v == "label") m.type = 6;
+        else if (v == "rect") m.type = 7;
     }
     else if (key == "enabled")
         m.enabled = (val.toInt() == 1);
@@ -152,17 +206,80 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
     else if (key == "radius")
     {
         int r = val.toInt();
-        m.radius = (r < 1 || r > 100) ? 1 : r;
+        m.radius = (r < 1 || r > 2000) ? 1 : r;
     }
     else if (key == "width")
     {
         int w = val.toInt();
-        m.width = (w < 1 || w > 10) ? 1 : w;
+        m.width = (w < 1 || w > 40) ? 1 : w;
     }
     else if (key == "color")
     {
-        if (val.size() == 7 && val[0] == '#') m.color = QColor(val);
-        else m.color = Qt::white;
+        m.color = parse_color(val, Qt::white);
+    }
+    else if (key == "size")
+    {
+        QStringList sz = val.split(',');
+        if (sz.size() >= 2)
+        {
+            m.w = sz[0].trimmed().toFloat();
+            m.h = sz[1].trimmed().toFloat();
+        }
+    }
+    else if (key == "source")
+    {
+        QString v = val.toLower();
+        m.source = (v == "rms") ? 1 : (v == "peak") ? 2 : 0;
+    }
+    else if (key == "text")        m.text = val;
+    else if (key == "font")        m.family = val;
+    else if (key == "font_size")   m.font_px = qBound(3.f, val.toFloat(), 200.f);
+    else if (key == "bold")        m.bold = (val.toInt() == 1);
+    else if (key == "spacing")     m.spacing = val.toFloat();
+    else if (key == "align")
+    {
+        QString v = val.toLower();
+        m.align = (v == "center") ? 1 : (v == "right") ? 2 : 0;
+    }
+    else if (key == "color2")      m.color2 = parse_color(val, QColor());
+    else if (key == "border")      m.border = parse_color(val, QColor());
+    else if (key == "corner")      m.corner = qMax(0.f, val.toFloat());
+    else if (key == "lamp")        m.lamp = val.toLower();
+    else if (key == "segments")    m.segments = qBound(0, val.toInt(), 400);
+    else if (key == "seg_gap")     m.seg_gap = qMax(0.f, val.toFloat());
+    else if (key == "offset_db")   m.offset_db = val.toFloat();
+    else if (key == "dim")         m.dim = qBound(0.f, val.toFloat(), 1.f);
+    else if (key == "hold_ms")     m.hold_ms = qMax(0.f, val.toFloat());
+    else if (key == "hold_fall")   m.hold_fall = qMax(1.f, val.toFloat());
+    else if (key == "pitch")       m.pitch = qMax(0.f, val.toFloat());
+    else if (key == "dot_w")       m.dot_w = qMax(0.f, val.toFloat());
+    else if (key == "thick")       m.thick = qMax(0.f, val.toFloat());
+    else if (key == "count")       m.count = qBound(1, val.toInt(), 20);
+    else if (key == "scale")       // "dB:position, dB:position, ..."
+    {
+        m.scale.clear();
+        for (const QString & pair : val.split(','))
+        {
+            QStringList kv = pair.split(':');
+            if (kv.size() == 2)
+                m.scale.append(QPointF(kv[0].trimmed().toDouble(), kv[1].trimmed().toDouble()));
+        }
+    }
+    else if (key == "zones")       // "dB:#colour[:height], ..."
+    {
+        m.zones.clear();
+        for (const QString & item : val.split(','))
+        {
+            QStringList kv = item.trimmed().split(':');
+            if (kv.size() >= 2)
+            {
+                Zone z;
+                z.db = kv[0].trimmed().toFloat();
+                z.color = parse_color(kv[1], Qt::white);
+                z.h = (kv.size() >= 3) ? kv[2].trimmed().toFloat() : 0.f;
+                m.zones.append(z);
+            }
+        }
     }
     else if (key == "min_angle")
     {
@@ -183,6 +300,41 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
     {
         float d = val.toFloat();
         m.db_max = (d < -300.f || d > 0.f) ? 0.f : d;
+    }
+}
+
+// position (px along the bar) -> dB, interpolating between the skin's scale points
+static float pos_to_db(const QVector<QPointF> & s, float pos)
+{
+    if (pos <= s.first().y())
+        return (float)s.first().x();
+    for (int i = 1; i < s.size(); i++)
+        if (pos <= s[i].y())
+        {
+            const float d = (float)(s[i].y() - s[i - 1].y());
+            if (d <= 0.f)
+                return (float)s[i].x();
+            const float t = (pos - (float)s[i - 1].y()) / d;
+            return (float)(s[i - 1].x() + t * (s[i].x() - s[i - 1].x()));
+        }
+    return (float)s.last().x();
+}
+
+// work out the dB threshold of every LED segment
+static void build_bar(Module & m)
+{
+    std::sort(m.scale.begin(), m.scale.end(), [](const QPointF & a, const QPointF & b) { return a.x() < b.x(); });
+    std::sort(m.zones.begin(), m.zones.end(), [](const Zone & a, const Zone & b) { return a.db < b.db; });
+
+    m.seg_db.clear();
+    if (m.segments < 1 || m.w <= 0.f)
+        return;
+
+    const float pitch = m.w / m.segments;
+    for (int i = 0; i < m.segments; i++)
+    {
+        const float pos = (i + 0.5f) * pitch;
+        m.seg_db.append(m.scale.isEmpty() ? -40.f + (pos / m.w) * 58.f : pos_to_db(m.scale, pos));
     }
 }
 
@@ -222,6 +374,9 @@ static bool load_skin(const SkinRef & ref, Skin & skin)
                 mod.angle_min += 180.f;
                 mod.angle_max += 180.f;
                 mod.angle_range = mod.angle_max - mod.angle_min;
+
+                if (mod.type == 3)
+                    build_bar(mod);
 
                 skin.modules.append(mod);
                 inside = false;
@@ -272,6 +427,7 @@ static qint64 last_render_ms = 0, last_tick_ms = 0;
 static double pow_ms[2];
 static float  peak_hold[2];
 static float  rms_values[3], peak_values[3];
+static float  rms_fast[3], peak_fast[3];   // before display smoothing (used by LED bars)
 
 static void reset_dsp()
 {
@@ -281,7 +437,7 @@ static void reset_dsp()
         pow_ms[c] = 0.0;   peak_hold[c] = FLOOR_DB;
     }
     for (int i = 0; i < 3; i++)
-        rms_values[i] = peak_values[i] = FLOOR_DB;
+        rms_values[i] = peak_values[i] = rms_fast[i] = peak_fast[i] = FLOOR_DB;
 }
 
 static float to_db(float x)
@@ -315,6 +471,12 @@ static void advance(const double ms[2], const float pk[2], double dt)
     const float rms_t[3] = { to_db((float)sqrt((pow_ms[0] + pow_ms[1]) * 0.5)), rms_db[0], rms_db[1] };
     const float pk_t[3]  = { qMax(peak_hold[0], peak_hold[1]), peak_hold[0], peak_hold[1] };
 
+    for (int i = 0; i < 3; i++)
+    {
+        rms_fast[i] = rms_t[i];
+        peak_fast[i] = pk_t[i];
+    }
+
     // Final smoothing of what the needle shows (in dB), so its motion stays even
     const double sm = (double)cfg_smooth();
     const float b = (sm < 1.0) ? 1.f : (float)(1.0 - exp(-dt / sm));
@@ -323,6 +485,288 @@ static void advance(const double ms[2], const float pk[2], double dt)
         rms_values[i]  += b * (rms_t[i] - rms_values[i]);
         peak_values[i] += b * (pk_t[i]  - peak_values[i]);
     }
+}
+
+/* ------------------------------------------------------------------------ *
+ *  Player state (counter, lamps) and drawing helpers for hardware-style skins
+ * ------------------------------------------------------------------------ */
+
+struct Status
+{
+    bool playing = false, paused = false, repeat = false, shuffle = false, mute = false;
+    int sec = 0;
+    int tape = 0;   // 0 = Normal, 1 = CrO2, 2 = Metal (derived from the file's quality)
+
+    bool operator==(const Status & o) const
+    {
+        return playing == o.playing && paused == o.paused && repeat == o.repeat &&
+               shuffle == o.shuffle && mute == o.mute && sec == o.sec && tape == o.tape;
+    }
+};
+
+static Status status;
+
+// Tape type from file quality: lossless = Metal, lossy >= 160 kbps = CrO2, else Normal
+static int tape_type()
+{
+    int br = 0, sr = 0, ch = 0;
+    aud_drct_get_info(br, sr, ch);
+
+    String fn = aud_drct_get_filename();
+    const char * c = (const char *) fn;
+    QString f = c ? QString::fromUtf8(c) : QString();
+    int q = f.indexOf('?');
+    if (q >= 0)
+        f.truncate(q);
+    const int dot = f.lastIndexOf('.'), slash = f.lastIndexOf('/');
+    const QString ext = (dot > slash && dot >= 0) ? f.mid(dot + 1).toUpper() : QString();
+
+    static const QStringList lossless = {"FLAC", "WAV", "WAVE", "APE", "WV", "AIF",
+                                         "AIFF", "TTA", "ALAC", "DSF", "DFF"};
+    if (lossless.contains(ext))
+        return 2;
+    return ((br + 500) / 1000 >= 160) ? 1 : 0;
+}
+
+// Read the player state; returns true if anything changed
+static bool poll_status(bool with_tape)
+{
+    Status s = status;
+    s.playing = aud_drct_get_playing();
+    s.paused = s.playing && aud_drct_get_paused();
+    s.sec = s.playing ? aud_drct_get_time() / 1000 : 0;
+    s.repeat = aud_get_bool(nullptr, "repeat");
+    s.shuffle = aud_get_bool(nullptr, "shuffle");
+    s.mute = (aud_drct_get_volume_main() == 0);
+    if (with_tape)
+        s.tape = (s.playing && aud_drct_get_ready()) ? tape_type() : 0;
+
+    const bool changed = !(s == status);
+    status = s;
+    return changed;
+}
+
+static float module_level(const Module & m, bool fast)
+{
+    const int src = m.source ? m.source : cfg_source();
+    const float * v = fast ? (src == 1 ? rms_fast : peak_fast) : (src == 1 ? rms_values : peak_values);
+    return v[(m.channel >= 0 && m.channel <= 2) ? m.channel : 0] + m.offset_db;
+}
+
+static QColor with_alpha(const QColor & c, float a)
+{
+    QColor d = c;
+    d.setAlphaF(a);
+    return d;
+}
+
+static const Zone * zone_for(const Module & m, float db)
+{
+    const Zone * best = m.zones.isEmpty() ? nullptr : &m.zones[0];
+    for (const Zone & z : m.zones)
+        if (z.db <= db)
+            best = &z;
+    return best;
+}
+
+// Segmented LED bar with zone colours, per-zone lit height and a peak-hold segment
+static void draw_bar(QPainter & p, const Module & m)
+{
+    if (m.segments < 1 || m.w <= 0.f || m.h <= 0.f || m.seg_db.size() != m.segments)
+        return;
+
+    const float lvl = module_level(m, true);
+    const float pitch = m.w / m.segments;
+    const float gap = (pitch - m.seg_gap >= 1.f) ? m.seg_gap : 0.f;
+    const float sw = pitch - gap;
+    const float bottom = m.py + m.h;
+
+    int hold_seg = -1;
+    if (m.hold_ms > 0.f)
+        for (int i = m.segments - 1; i >= 0; i--)
+            if (m.seg_db[i] <= m.hold_db) { hold_seg = i; break; }
+
+    p.setPen(Qt::NoPen);
+    for (int i = 0; i < m.segments; i++)
+    {
+        const Zone * z = zone_for(m, m.seg_db[i]);
+        const QColor c = z ? z->color : QColor(Qt::white);
+        const float x = m.px + i * pitch;
+
+        p.setBrush(with_alpha(c, m.dim));                    // unlit segment
+        p.drawRect(QRectF(x, m.py, sw, m.h));
+
+        if (lvl >= m.seg_db[i] || i == hold_seg)             // lit part
+        {
+            const float zh = (z && z->h > 0.f) ? qMin(z->h, m.h) : m.h;
+            p.setBrush(c);
+            p.drawRect(QRectF(x, bottom - zh, sw, zh));
+        }
+    }
+}
+
+// One seven-segment digit (digit < 0 draws all segments unlit)
+static void draw_digit(QPainter & p, float x, float y, float w, float h, float t,
+                       int digit, const QColor & on, const QColor & off)
+{
+    static const int mask[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
+    const int bits = (digit >= 0 && digit <= 9) ? mask[digit] : 0;
+
+    const float g = t * 0.12f;
+    const float cyT = y + t * 0.5f, cyM = y + h * 0.5f, cyB = y + h - t * 0.5f;
+    const float cxL = x + t * 0.5f, cxR = x + w - t * 0.5f;
+
+    auto hseg = [&](float cy) {
+        QPolygonF q;
+        const float x0 = x + t * 0.5f + g, x1 = x + w - t * 0.5f - g;
+        q << QPointF(x0 - t * 0.5f, cy) << QPointF(x0, cy - t * 0.5f) << QPointF(x1, cy - t * 0.5f)
+          << QPointF(x1 + t * 0.5f, cy) << QPointF(x1, cy + t * 0.5f) << QPointF(x0, cy + t * 0.5f);
+        return q;
+    };
+    auto vseg = [&](float cx, float y0, float y1) {
+        QPolygonF q;
+        q << QPointF(cx, y0) << QPointF(cx + t * 0.5f, y0 + t * 0.5f) << QPointF(cx + t * 0.5f, y1 - t * 0.5f)
+          << QPointF(cx, y1) << QPointF(cx - t * 0.5f, y1 - t * 0.5f) << QPointF(cx - t * 0.5f, y0 + t * 0.5f);
+        return q;
+    };
+
+    const QPolygonF segs[7] = {
+        hseg(cyT),                         // a  top
+        vseg(cxR, cyT + g, cyM - g),       // b  upper right
+        vseg(cxR, cyM + g, cyB - g),       // c  lower right
+        hseg(cyB),                         // d  bottom
+        vseg(cxL, cyM + g, cyB - g),       // e  lower left
+        vseg(cxL, cyT + g, cyM - g),       // f  upper left
+        hseg(cyM)                          // g  middle
+    };
+
+    p.setPen(Qt::NoPen);
+    for (int i = 0; i < 7; i++)
+    {
+        p.setBrush(((bits >> i) & 1) ? on : off);
+        p.drawPolygon(segs[i]);
+    }
+}
+
+// Tape counter: elapsed time as MM.SS
+static void draw_counter(QPainter & p, const Module & m)
+{
+    const int mm = (status.sec / 60) % 100, ss = status.sec % 60;
+    const int d[4] = {mm / 10, mm % 10, ss / 10, ss % 10};
+
+    const float dw = m.w > 0.f ? m.w : 14.f, dh = m.h > 0.f ? m.h : 20.f;
+    const float pitch = m.pitch > 0.f ? m.pitch : dw * 1.15f;
+    const float dotw = m.dot_w > 0.f ? m.dot_w : dw * 0.8f;
+    const float t = m.thick > 0.f ? m.thick : qMax(1.5f, dh * 0.15f);
+    const QColor off = with_alpha(m.color, m.dim);
+
+    float x = m.px;
+    for (int i = 0; i < 4; i++)
+    {
+        draw_digit(p, x, m.py, dw, dh, t, d[i], m.color, off);
+        if (i == 1)   // the dot between minutes and seconds
+        {
+            const float dot = qMax(2.f, t);
+            p.setPen(Qt::NoPen);
+            p.setBrush(m.color);
+            p.drawRect(QRectF(x + dw + (pitch - dw + dotw) / 2.f - dot / 2.f, m.py + dh - dot, dot, dot));
+            x += pitch + dotw;
+        }
+        else
+            x += pitch;
+    }
+}
+
+// Text anchored at (px, baseline py); align: 0 left, 1 centre, 2 right
+static void draw_text(QPainter & p, const Module & m, const QColor & c)
+{
+    if (m.text.isEmpty())
+        return;
+
+    QFont f = p.font();
+    if (!m.family.isEmpty())
+        f.setFamily(m.family);
+    f.setPixelSize(qMax(4, qRound(m.font_px)));
+    f.setBold(m.bold);
+    f.setHintingPreference(QFont::PreferNoHinting);
+    if (m.spacing != 0.f)
+        f.setLetterSpacing(QFont::AbsoluteSpacing, m.spacing);
+    p.setFont(f);
+    p.setPen(c);
+
+    const QFontMetricsF fm(f);
+    const qreal tw = fm.horizontalAdvance(m.text);
+    qreal x = m.px;
+    if (m.align == 1) x -= tw / 2.0;
+    else if (m.align == 2) x -= tw;
+    p.drawText(QPointF(x, m.py), m.text);
+}
+
+static bool lamp_lit(const Module & m)
+{
+    const QString & k = m.lamp;
+    if (k == "repeat")  return status.repeat;
+    if (k == "shuffle") return status.shuffle;
+    if (k == "mute")    return status.mute;
+    if (k == "playing") return status.playing;
+    if (k == "paused")  return status.paused;
+    if (k == "normal")  return status.tape == 0;
+    if (k == "cro2")    return status.tape == 1;
+    if (k == "metal")   return status.tape == 2;
+    if (k == "always")  return true;
+    return false;       // "off" or unknown: decorative, never lit
+}
+
+// Lamp = text that lights up, or the animated "chase" arrows
+static void draw_lamp(QPainter & p, const Module & m, int chase_step)
+{
+    const QColor off = m.color2.isValid() ? m.color2 : with_alpha(m.color, 0.25f);
+
+    if (m.lamp == "chase")
+    {
+        const float w = m.w > 0.f ? m.w : 7.f, h = m.h > 0.f ? m.h : 10.f;
+        const float pitch = m.pitch > 0.f ? m.pitch : w + 2.f;
+        const bool run = status.playing && !status.paused;
+        const int lit = run ? (m.count - 1 - (chase_step % m.count)) : -1;
+
+        p.setPen(Qt::NoPen);
+        for (int i = 0; i < m.count; i++)
+        {
+            const float x = m.px + i * pitch;
+            QPolygonF tri;
+            tri << QPointF(x, m.py + h / 2) << QPointF(x + w, m.py) << QPointF(x + w, m.py + h);
+            p.setBrush(i == lit ? m.color : off);
+            p.drawPolygon(tri);
+        }
+        return;
+    }
+
+    draw_text(p, m, lamp_lit(m) ? m.color : off);
+}
+
+// Rectangle: flat colour, or vertical gradient colour -> color2, optional border
+static void draw_rect(QPainter & p, const Module & m)
+{
+    QRectF r(m.px, m.py, m.w, m.h);
+    if (m.color2.isValid())
+    {
+        QLinearGradient g(r.topLeft(), r.bottomLeft());
+        g.setColorAt(0.0, m.color);
+        g.setColorAt(1.0, m.color2);
+        p.setBrush(g);
+    }
+    else
+        p.setBrush(m.color);
+
+    if (m.border.isValid())
+    {
+        p.setPen(QPen(m.border, 1));
+        r.adjust(0.5, 0.5, -0.5, -0.5);
+    }
+    else
+        p.setPen(Qt::NoPen);
+
+    p.drawRoundedRect(r, m.corner, m.corner);
 }
 
 /* ------------------------------------------------------------------------ *
@@ -350,6 +794,8 @@ public:
                 if (load_skin(r, m_skin))
                     break;
         }
+        m_has_chase = has_chase();
+        poll_status(true);
         resize(sizeHint());
 
         QObject::connect(&m_timer, &QTimer::timeout, [this]() { tick(); });
@@ -357,19 +803,23 @@ public:
         m_timer.start(16);   // ~60 Hz redraw
     }
 
+    // Preferred size is the skin's own size (never wider than 640 px); the skin is
+    // scaled to fit whatever size the widget actually gets
     QSize sizeHint() const override
     {
         if (!m_skin.valid) return QSize(275, 116);
-        return QSize(m_skin.width, m_skin.height - titlebar_height());
+        const int w = m_skin.width, h = m_skin.height - titlebar_height();
+        const double k = (w > 640) ? 640.0 / w : 1.0;
+        return QSize(qRound(w * k), qRound(h * k));
     }
 
-    QSize minimumSizeHint() const override { return sizeHint(); }
+    QSize minimumSizeHint() const override { return QSize(120, 60); }
 
 protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
-        p.fillRect(rect(), palette().window());
+        p.fillRect(rect(), m_skin.window_color.isValid() ? QBrush(m_skin.window_color) : palette().window());
 
         if (!m_skin.valid)
         {
@@ -380,13 +830,18 @@ protected:
         }
 
         const int tb = titlebar_height();
-        const int w = m_skin.width, h = m_skin.height - tb;
+        const double w = m_skin.width, h = m_skin.height - tb;
 
-        // centre the skin in the widget, crop the (unused) title bar
-        p.translate((width() - w) / 2, (height() - h) / 2);
-        p.setClipRect(0, 0, w, h);
+        // scale the skin to fit the widget (keeping its aspect ratio), centre it,
+        // and crop the (unused) title bar
+        const double k = qMin(width() / w, height() / h);
+        p.translate((width() - w * k) / 2.0, (height() - h * k) / 2.0);
+        p.scale(k, k);
+        p.setClipRect(QRectF(0, 0, w, h));
         p.translate(0, -tb);
         p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::TextAntialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
 
         if (!m_skin.background.isNull())
             p.drawPixmap(0, tb, m_skin.background);
@@ -398,34 +853,42 @@ protected:
             for (const Module & m : m_skin.modules)
             {
                 if (!m.enabled || m.layer != layer) continue;
-                if (m.channel < 0 || m.channel > 2) continue;
 
-                float v = values[m.channel];
-
-                if (m.type == 1)   // analog needle
+                if (m.type == 1 || m.type == 2)
                 {
-                    const float vn = v + (float)cfg_gain(cfg_source());   // calibration gain: needles only
-                    float angle;
-                    if (vn <= m.db_min)      angle = m.angle_min;
-                    else if (vn >= m.db_max) angle = m.angle_max;
-                    else
+                    if (m.channel < 0 || m.channel > 2) continue;
+                    float v = values[m.channel];
+
+                    if (m.type == 1)   // analog needle
                     {
-                        angle = log10f(fabsf(vn - 1.f)) / log10f(fabsf(m.db_min) + 1.f);
-                        angle = m.angle_range * (1.f - angle) + m.angle_min;
+                        const float vn = v + (float)cfg_gain(cfg_source());   // calibration gain: needles only
+                        float angle;
+                        if (vn <= m.db_min)      angle = m.angle_min;
+                        else if (vn >= m.db_max) angle = m.angle_max;
+                        else
+                        {
+                            angle = log10f(fabsf(vn - 1.f)) / log10f(fabsf(m.db_min) + 1.f);
+                            angle = m.angle_range * (1.f - angle) + m.angle_min;
+                        }
+
+                        int x = m.px + (int)floorf((float)m.radius * cosf((90.f + angle) * rad));
+                        int y = m.py + (int)floorf((float)m.radius * sinf((90.f + angle) * rad));
+
+                        p.setPen(QPen(m.color, m.width, Qt::SolidLine, Qt::FlatCap, Qt::MiterJoin));
+                        p.drawLine(m.px, m.py, x, y);
                     }
-
-                    int x = m.px + (int)floorf((float)m.radius * cosf((90.f + angle) * rad));
-                    int y = m.py + (int)floorf((float)m.radius * sinf((90.f + angle) * rad));
-
-                    p.setPen(QPen(m.color, m.width, Qt::SolidLine, Qt::FlatCap, Qt::MiterJoin));
-                    p.drawLine(m.px, m.py, x, y);
+                    else               // on/off image
+                    {
+                        const QPixmap & img = (v >= m.db_min && v <= m.db_max) ? m.on_img : m.off_img;
+                        if (!img.isNull())
+                            p.drawPixmap(m.px, m.py, img);
+                    }
                 }
-                else if (m.type == 2)   // on/off image
-                {
-                    const QPixmap & img = (v >= m.db_min && v <= m.db_max) ? m.on_img : m.off_img;
-                    if (!img.isNull())
-                        p.drawPixmap(m.px, m.py, img);
-                }
+                else if (m.type == 3) draw_bar(p, m);
+                else if (m.type == 4) draw_counter(p, m);
+                else if (m.type == 5) draw_lamp(p, m, m_chase);
+                else if (m.type == 6) draw_text(p, m, m.color);
+                else if (m.type == 7) draw_rect(p, m);
             }
     }
 
@@ -456,13 +919,50 @@ private:
             return;
         m_skin = s;
         aud_set_str(CFG, "skin", QString("%1:%2").arg(ref.pathnum).arg(ref.name).toUtf8().constData());
-        setMinimumSize(sizeHint());
+        m_has_chase = has_chase();
         updateGeometry();
         update();
     }
 
+    bool has_chase() const
+    {
+        for (const Module & m : m_skin.modules)
+            if (m.type == 5 && m.lamp == "chase")
+                return true;
+        return false;
+    }
+
+    // Bar peak-hold markers: jump up with the level, stay for hold_ms, then fall
+    bool update_holds(qint64 now, double dt)
+    {
+        bool active = false;
+        for (Module & m : m_skin.modules)
+        {
+            if (m.type != 3 || m.hold_ms <= 0.f || m.seg_db.isEmpty())
+                continue;
+
+            const float v = module_level(m, true);
+            if (v >= m.hold_db)
+            {
+                m.hold_db = v;
+                m.hold_t = now;
+            }
+            else if (now - m.hold_t > (qint64)m.hold_ms)
+            {
+                m.hold_db -= m.hold_fall * (float)(dt / 1000.0);
+                if (m.hold_db < v)
+                    m.hold_db = v;
+            }
+
+            if (m.hold_db > m.seg_db[0] - 1.f)
+                active = true;
+        }
+        return active;
+    }
+
     // Runs ~60 times a second: feeds the latest snapshot (or silence, if no
-    // audio has arrived for 100 ms) through the ballistics and redraws.
+    // audio has arrived for 100 ms) through the ballistics, refreshes the
+    // player state a few times a second, and redraws when something moved.
     void tick()
     {
         const qint64 now = clock_ms.elapsed();
@@ -474,12 +974,37 @@ private:
         const float pk[2] = {live ? snap_pk[0] : FLOOR_DB, live ? snap_pk[1] : FLOOR_DB};
         advance(ms, pk, dt);
 
-        if (live || rms_values[0] > FLOOR_DB + 0.05f || peak_values[0] > FLOOR_DB + 0.05f)
+        bool changed = false;
+        if (now - m_last_poll >= 100)
+        {
+            m_last_poll = now;
+            const bool with_tape = (now - m_last_tape >= 500);
+            if (with_tape)
+                m_last_tape = now;
+            changed = poll_status(with_tape);
+        }
+
+        if (m_has_chase)
+        {
+            const int step = (status.playing && !status.paused) ? (int)((now / 140) % 1000) : 0;
+            if (step != m_chase)
+            {
+                m_chase = step;
+                changed = true;
+            }
+        }
+
+        const bool holding = update_holds(now, dt);
+
+        if (live || changed || holding || rms_values[0] > FLOOR_DB + 0.05f || peak_values[0] > FLOOR_DB + 0.05f)
             update();
     }
 
     Skin m_skin;
     QTimer m_timer;
+    qint64 m_last_poll = 0, m_last_tape = 0;
+    int m_chase = 0;
+    bool m_has_chase = false;
 };
 
 static VUWidget * widget = nullptr;
