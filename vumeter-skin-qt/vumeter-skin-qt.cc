@@ -107,6 +107,8 @@ struct Skin
     QPixmap background;
     QPixmap titlebar;      // only used to know how much to crop off the top
     QColor window_color;   // optional fill around/behind the skin
+    QPixmap overlay;       // optional glass/reflection layer drawn on top of everything
+    float overlay_opacity = 1.f;
     QVector<Module> modules;
 };
 
@@ -164,6 +166,10 @@ static void parse_skin_key(Skin & s, const QString & key, const QString & val, c
         s.titlebar = QPixmap(dir.filePath(val));
     else if (key == "window_color")
         s.window_color = QColor(val.trimmed());
+    else if (key == "overlay_img")
+        s.overlay = QPixmap(dir.filePath(val));
+    else if (key == "overlay_opacity")      // percent
+        s.overlay_opacity = qBound(0.f, val.toFloat() / 100.f, 1.f);
     // titlebar_on_img, exit_button_pos, conf_button_pos: not used in the Qt port
 }
 
@@ -399,6 +405,10 @@ static bool load_skin(const SkinRef & ref, Skin & skin)
         if (inside) parse_module_key(mod, key, val, dir);
         else        parse_skin_key(skin, key, val, dir);
     }
+
+    // glass layer: "overlay.png" next to skin.cfg is picked up automatically
+    if (skin.overlay.isNull() && QFileInfo::exists(dir.filePath("overlay.png")))
+        skin.overlay = QPixmap(dir.filePath("overlay.png"));
 
     skin.valid = true;
     return true;
@@ -904,6 +914,25 @@ protected:
                 else if (m.type == 6) draw_text(p, m, m.color);
                 else if (m.type == 7) draw_rect(p, m);
             }
+
+        // glass overlay: stretched over the whole skin, on top of everything.
+        // The scaled copy is cached, so it is only re-scaled when the size changes.
+        if (!m_skin.overlay.isNull())
+        {
+            const qreal dpr = devicePixelRatioF();
+            const QSize target(qMax(1, qRound(w * k * dpr)), qMax(1, qRound(h * k * dpr)));
+            if (m_overlay_cache.size() != target || m_overlay_key != m_skin.overlay.cacheKey())
+            {
+                m_overlay_cache = m_skin.overlay.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                m_overlay_cache.setDevicePixelRatio(dpr);
+                m_overlay_key = m_skin.overlay.cacheKey();
+            }
+
+            p.resetTransform();
+            p.setClipping(false);
+            p.setOpacity(m_skin.overlay_opacity);
+            p.drawPixmap(QPointF((width() - w * k) / 2.0, (height() - h * k) / 2.0), m_overlay_cache);
+        }
     }
 
     void contextMenuEvent(QContextMenuEvent * e) override
@@ -1019,6 +1048,8 @@ private:
     qint64 m_last_poll = 0, m_last_tape = 0;
     int m_chase = 0;
     bool m_has_chase = false;
+    QPixmap m_overlay_cache;
+    qint64 m_overlay_key = 0;
 };
 
 static VUWidget * widget = nullptr;
