@@ -20,13 +20,15 @@ Copy skins to "Audacious\share\audacious\VU_Meter_skins\"
 Enable Plugin (Services->Plugin->Visualization->Analog VU Meter)
 
 <img width="657" height="555" alt="location" src="https://github.com/user-attachments/assets/1453f8e0-bf4f-497a-9b11-50322f877873" />
-## Use
-Just right click on VU skin and change
-<img width="362" height="247" alt="Screenshot 2026-11-24 140204" src="https://github.com/user-attachments/assets/30cbbe6a-7d68-4508-b078-42d8a173a995" />
-
-
 
 Launch Audacious
+
+## Use
+
+Just right click on VU skin and change
+
+<img width="362" height="247" alt="Screenshot 2026-11-24 140204" src="https://github.com/user-attachments/assets/30cbbe6a-7d68-4508-b078-42d8a173a995" />
+
 
 ## Preview
 
