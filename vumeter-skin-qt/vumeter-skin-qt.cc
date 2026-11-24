@@ -63,7 +63,8 @@ struct Module
     int layer = 1;         // 1..5
     int width = 1;         // needle width
     int radius = 1;        // needle length
-    int px = 0, py = 0;    // position (skin coordinates)
+    int px = 0, py = 0;    // position (skin coordinates, rounded; used by needles/images)
+    float fx = 0.f, fy = 0.f;   // exact position (decimals allowed; used by the newer elements)
     QColor color = Qt::white;
     float db_min = -300.f, db_max = 0.f;
     float angle_min = -180.f, angle_max = 180.f, angle_range = 0.f;
@@ -82,7 +83,8 @@ struct Module
     // bar
     int segments = 0;
     float seg_gap = 1.f;
-    float offset_db = 0.f;         // calibration added to the level (18 = full scale is +18)
+    float offset_db = 0.f;         // calibration added to the (peak) level
+    float extend_db = -999.f;      // loudness extension: RMS + extend_db can push the bar higher (-999 = off)
     float dim = 0.15f;             // brightness of unlit segments / digits
     float hold_ms = 0.f, hold_fall = 20.f;
     QVector<QPointF> scale;        // (dB, position in px along the bar)
@@ -195,8 +197,10 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
         QStringList p = val.split(',');
         if (p.size() >= 2)
         {
-            m.px = p[0].trimmed().toInt();
-            m.py = p[1].trimmed().toInt();
+            m.fx = p[0].trimmed().toFloat();
+            m.fy = p[1].trimmed().toFloat();
+            m.px = qRound(m.fx);
+            m.py = qRound(m.fy);
         }
     }
     else if (key == "on_img")
@@ -248,6 +252,7 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
     else if (key == "segments")    m.segments = qBound(0, val.toInt(), 400);
     else if (key == "seg_gap")     m.seg_gap = qMax(0.f, val.toFloat());
     else if (key == "offset_db")   m.offset_db = val.toFloat();
+    else if (key == "extend_db")   m.extend_db = val.toFloat();
     else if (key == "dim")         m.dim = qBound(0.f, val.toFloat(), 1.f);
     else if (key == "hold_ms")     m.hold_ms = qMax(0.f, val.toFloat());
     else if (key == "hold_fall")   m.hold_fall = qMax(1.f, val.toFloat());
@@ -550,7 +555,16 @@ static float module_level(const Module & m, bool fast)
 {
     const int src = m.source ? m.source : cfg_source();
     const float * v = fast ? (src == 1 ? rms_fast : peak_fast) : (src == 1 ? rms_values : peak_values);
-    return v[(m.channel >= 0 && m.channel <= 2) ? m.channel : 0] + m.offset_db;
+    const int ch = (m.channel >= 0 && m.channel <= 2) ? m.channel : 0;
+
+    float lvl = v[ch] + m.offset_db;
+
+    // Loudness extension: a digital peak can never exceed 0 dBFS, so the top of the
+    // scale is reached through sustained loudness (RMS) instead of through peaks.
+    if (m.extend_db > -900.f)
+        lvl = qMax(lvl, (fast ? rms_fast : rms_values)[ch] + m.extend_db);
+
+    return lvl;
 }
 
 static QColor with_alpha(const QColor & c, float a)
@@ -579,7 +593,7 @@ static void draw_bar(QPainter & p, const Module & m)
     const float pitch = m.w / m.segments;
     const float gap = (pitch - m.seg_gap >= 1.f) ? m.seg_gap : 0.f;
     const float sw = pitch - gap;
-    const float bottom = m.py + m.h;
+    const float bottom = m.fy + m.h;
 
     int hold_seg = -1;
     if (m.hold_ms > 0.f)
@@ -591,10 +605,10 @@ static void draw_bar(QPainter & p, const Module & m)
     {
         const Zone * z = zone_for(m, m.seg_db[i]);
         const QColor c = z ? z->color : QColor(Qt::white);
-        const float x = m.px + i * pitch;
+        const float x = m.fx + i * pitch;
 
         p.setBrush(with_alpha(c, m.dim));                    // unlit segment
-        p.drawRect(QRectF(x, m.py, sw, m.h));
+        p.drawRect(QRectF(x, m.fy, sw, m.h));
 
         if (lvl >= m.seg_db[i] || i == hold_seg)             // lit part
         {
@@ -660,16 +674,16 @@ static void draw_counter(QPainter & p, const Module & m)
     const float t = m.thick > 0.f ? m.thick : qMax(1.5f, dh * 0.15f);
     const QColor off = with_alpha(m.color, m.dim);
 
-    float x = m.px;
+    float x = m.fx;
     for (int i = 0; i < 4; i++)
     {
-        draw_digit(p, x, m.py, dw, dh, t, d[i], m.color, off);
+        draw_digit(p, x, m.fy, dw, dh, t, d[i], m.color, off);
         if (i == 1)   // the dot between minutes and seconds
         {
             const float dot = qMax(2.f, t);
             p.setPen(Qt::NoPen);
             p.setBrush(m.color);
-            p.drawRect(QRectF(x + dw + (pitch - dw + dotw) / 2.f - dot / 2.f, m.py + dh - dot, dot, dot));
+            p.drawRect(QRectF(x + dw + (pitch - dw + dotw) / 2.f - dot / 2.f, m.fy + dh - dot, dot, dot));
             x += pitch + dotw;
         }
         else
@@ -696,10 +710,10 @@ static void draw_text(QPainter & p, const Module & m, const QColor & c)
 
     const QFontMetricsF fm(f);
     const qreal tw = fm.horizontalAdvance(m.text);
-    qreal x = m.px;
+    qreal x = m.fx;
     if (m.align == 1) x -= tw / 2.0;
     else if (m.align == 2) x -= tw;
-    p.drawText(QPointF(x, m.py), m.text);
+    p.drawText(QPointF(x, m.fy), m.text);
 }
 
 static bool lamp_lit(const Module & m)
@@ -732,9 +746,9 @@ static void draw_lamp(QPainter & p, const Module & m, int chase_step)
         p.setPen(Qt::NoPen);
         for (int i = 0; i < m.count; i++)
         {
-            const float x = m.px + i * pitch;
+            const float x = m.fx + i * pitch;
             QPolygonF tri;
-            tri << QPointF(x, m.py + h / 2) << QPointF(x + w, m.py) << QPointF(x + w, m.py + h);
+            tri << QPointF(x, m.fy + h / 2) << QPointF(x + w, m.fy) << QPointF(x + w, m.fy + h);
             p.setBrush(i == lit ? m.color : off);
             p.drawPolygon(tri);
         }
@@ -747,7 +761,7 @@ static void draw_lamp(QPainter & p, const Module & m, int chase_step)
 // Rectangle: flat colour, or vertical gradient colour -> color2, optional border
 static void draw_rect(QPainter & p, const Module & m)
 {
-    QRectF r(m.px, m.py, m.w, m.h);
+    QRectF r(m.fx, m.fy, m.w, m.h);
     if (m.color2.isValid())
     {
         QLinearGradient g(r.topLeft(), r.bottomLeft());
