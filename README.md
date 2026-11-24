@@ -22,7 +22,8 @@ Enable Plugin (Services->Plugin->Visualization->Analog VU Meter)
 <img width="657" height="555" alt="location" src="https://github.com/user-attachments/assets/1453f8e0-bf4f-497a-9b11-50322f877873" />
 ## Use
 Just right click on VU skin and change
-<img width="3440" height="1440" alt="Desktop Screenshot 2026 10 10 - 21 07 53 19" src="https://github.com/user-attachments/assets/66b4d84b-ba6c-4787-a99e-762e0db681a4" />
+<img width="362" height="247" alt="Screenshot 2026-11-24 140204" src="https://github.com/user-attachments/assets/30cbbe6a-7d68-4508-b078-42d8a173a995" />
+
 
 
 Launch Audacious
