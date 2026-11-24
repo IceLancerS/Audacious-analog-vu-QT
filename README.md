@@ -20,6 +20,9 @@ Copy skins to "Audacious\share\audacious\VU_Meter_skins\"
 Enable Plugin (Services->Plugin->Visualization->Analog VU Meter)
 
 <img width="657" height="555" alt="location" src="https://github.com/user-attachments/assets/1453f8e0-bf4f-497a-9b11-50322f877873" />
+## Use
+Just right click on VU skin and change
+<img width="3440" height="1440" alt="Desktop Screenshot 2026 10 10 - 21 07 53 19" src="https://github.com/user-attachments/assets/66b4d84b-ba6c-4787-a99e-762e0db681a4" />
 
 
 Launch Audacious
