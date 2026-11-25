@@ -56,7 +56,7 @@ struct Zone
 struct Module
 {
     // 1 = analog needle, 2 = on/off image,
-    // 3 = LED bar, 4 = counter, 5 = lamp, 6 = text label, 7 = rectangle
+    // 3 = LED bar, 4 = counter, 5 = lamp, 6 = text label, 7 = rectangle, 8 = lines
     int type = 0;
     bool enabled = false;
     int channel = 0;       // 0 = average, 1 = left, 2 = right
@@ -90,6 +90,7 @@ struct Module
     QVector<QPointF> scale;        // (dB, position in px along the bar)
     QVector<Zone> zones;
     QVector<float> seg_db;         // computed: dB threshold of every segment
+    QVector<QLineF> lines;         // type 8: group of straight lines (scale ticks)
     // counter / chase
     float pitch = 0.f, dot_w = 0.f, thick = 0.f;
     int count = 4;
@@ -185,6 +186,7 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
         else if (v == "lamp") m.type = 5;
         else if (v == "label") m.type = 6;
         else if (v == "rect") m.type = 7;
+        else if (v == "line") m.type = 8;
     }
     else if (key == "enabled")
         m.enabled = (val.toInt() == 1);
@@ -266,7 +268,18 @@ static void parse_module_key(Module & m, const QString & key, const QString & va
     else if (key == "dot_w")       m.dot_w = qMax(0.f, val.toFloat());
     else if (key == "thick")       m.thick = qMax(0.f, val.toFloat());
     else if (key == "count")       m.count = qBound(1, val.toInt(), 20);
-    else if (key == "scale")       // "dB:position, dB:position, ..."
+    else if (key == "lines")       // "x1,y1,x2,y2; x1,y1,x2,y2; ..."
+    {
+        m.lines.clear();
+        for (const QString & seg : val.split(';'))
+        {
+            QStringList c = seg.split(',');
+            if (c.size() >= 4)
+                m.lines.append(QLineF(c[0].trimmed().toDouble(), c[1].trimmed().toDouble(),
+                                      c[2].trimmed().toDouble(), c[3].trimmed().toDouble()));
+        }
+    }
+    else if (key == "scale")       // bar: "dB:position, ..."   needle: "dB:angle, ..."
     {
         m.scale.clear();
         for (const QString & pair : val.split(','))
@@ -388,6 +401,9 @@ static bool load_skin(const SkinRef & ref, Skin & skin)
 
                 if (mod.type == 3)
                     build_bar(mod);
+                else if (mod.type == 1 && !mod.scale.isEmpty())
+                    std::sort(mod.scale.begin(), mod.scale.end(),
+                              [](const QPointF & a, const QPointF & b) { return a.x() < b.x(); });
 
                 skin.modules.append(mod);
                 inside = false;
@@ -768,6 +784,33 @@ static void draw_lamp(QPainter & p, const Module & m, int chase_step)
     draw_text(p, m, lamp_lit(m) ? m.color : off);
 }
 
+// dB -> needle angle from a "dB:angle" table (sorted by dB); clamps at both ends
+static float scale_angle(const QVector<QPointF> & s, float db)
+{
+    if (db <= s.first().x())
+        return (float)s.first().y();
+    for (int i = 1; i < s.size(); i++)
+        if (db <= s[i].x())
+        {
+            const float d = (float)(s[i].x() - s[i - 1].x());
+            if (d <= 0.f)
+                return (float)s[i].y();
+            const float t = (db - (float)s[i - 1].x()) / d;
+            return (float)(s[i - 1].y() + t * (s[i].y() - s[i - 1].y()));
+        }
+    return (float)s.last().y();
+}
+
+// A group of straight lines sharing one colour and width (scale ticks)
+static void draw_lines(QPainter & p, const Module & m)
+{
+    if (m.lines.isEmpty())
+        return;
+    p.setPen(QPen(m.color, m.thick > 0.f ? m.thick : 1.f, Qt::SolidLine, Qt::FlatCap));
+    p.setBrush(Qt::NoBrush);
+    p.drawLines(m.lines);
+}
+
 // Rectangle: flat colour, or vertical gradient colour -> color2, optional border
 static void draw_rect(QPainter & p, const Module & m)
 {
@@ -878,7 +921,16 @@ protected:
             {
                 if (!m.enabled || m.layer != layer) continue;
 
-                if (m.type == 1 || m.type == 2)
+                if (m.type == 1 && !m.scale.isEmpty())
+                {
+                    // table-driven needle: scale = "dB:angle, ..." (degrees, 0 = up, + = right).
+                    // Level = smoothed value + offset_db (the Gain settings are not used).
+                    const float a = scale_angle(m.scale, module_level(m, false)) * rad;
+                    const double rr = m.radius;
+                    p.setPen(QPen(m.color, m.thick > 0.f ? (qreal)m.thick : (qreal)m.width, Qt::SolidLine, Qt::RoundCap));
+                    p.drawLine(QPointF(m.fx, m.fy), QPointF(m.fx + rr * sin(a), m.fy - rr * cos(a)));
+                }
+                else if (m.type == 1 || m.type == 2)
                 {
                     if (m.channel < 0 || m.channel > 2) continue;
                     float v = values[m.channel];
@@ -913,6 +965,7 @@ protected:
                 else if (m.type == 5) draw_lamp(p, m, m_chase);
                 else if (m.type == 6) draw_text(p, m, m.color);
                 else if (m.type == 7) draw_rect(p, m);
+                else if (m.type == 8) draw_lines(p, m);
             }
 
         // glass overlay: stretched over the whole skin, on top of everything.
