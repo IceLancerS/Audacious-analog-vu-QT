@@ -8,7 +8,7 @@ Originally based on legacy GTK2 source code (inspired by the classic [XMMS VU Me
 - **Modern Qt6 Native Rendering:** Fully ported away from deprecated GTK2 dependencies to run smoothly with Qt6.
 - **Audacious 4.6.1 ABI Compatible:** Built against contemporary header and library structures using Meson and Ninja.
 - **Lightweight & Responsive:** Retains the vintage dual-needle aesthetic while leveraging hardware-accelerated UI rendering.
-- **New Technics Style PEAKS**
+- **New Technics Digital and Analog Style PEAKS**
 
 ## Installation
 Download the Audacious-analog-vu-QT.zip file from the [Audacious-analog-vu-QT Plugin](https://github.com/IceLancerS/Audacious-analog-vu-QT/releases)
@@ -34,11 +34,14 @@ Just right click on VU skin and change
 
 https://github.com/user-attachments/assets/bcde827d-d042-4b64-819c-99bf04dea5f0
 
-Technics Style PEAKS
+Technics Digital Style PEAKS
 Everything on its screen responds to actual options within player. 
 ## Normal , CrO2 , Metal are sound quality if lossless is playing Metal will be shown
 https://github.com/user-attachments/assets/901a568e-d0fc-401f-b5dd-6ef010d5dace
 
+Technics Analog Style PEAKS
+
+<img width="1624" height="381" alt="Screenshot 2026-11-25 214007" src="https://github.com/user-attachments/assets/d2b7e5e8-0d89-468d-9d09-a54b0060bebd" />
 
 ## Building from Source
 
